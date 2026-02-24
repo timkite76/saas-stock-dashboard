@@ -76,8 +76,17 @@ for sector, tickers in SAAS_COMPANIES.items():
 # ─────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────
+def _isna(val):
+    if val is None:
+        return True
+    try:
+        return pd.isna(val)
+    except (ValueError, TypeError):
+        return False
+
+
 def format_large_number(num):
-    if num is None or (isinstance(num, float) and np.isnan(num)):
+    if _isna(num):
         return "N/A"
     num = float(num)
     if abs(num) >= 1e12:
@@ -92,13 +101,13 @@ def format_large_number(num):
 
 
 def safe_pct(val):
-    if val is None or (isinstance(val, float) and np.isnan(val)):
+    if _isna(val):
         return "N/A"
     return f"{val:.1f}%"
 
 
 def safe_val(val, fmt=".2f", prefix="", suffix=""):
-    if val is None or (isinstance(val, float) and np.isnan(val)):
+    if _isna(val):
         return "N/A"
     return f"{prefix}{val:{fmt}}{suffix}"
 
@@ -155,7 +164,7 @@ def fetch_all_fundamentals(_ticker_list: tuple) -> tuple:
     results, unavailable = [], []
     progress_bar = st.progress(0, text="Fetching stock data...")
     total = len(_ticker_list)
-    with ThreadPoolExecutor(max_workers=10) as executor:
+    with ThreadPoolExecutor(max_workers=5) as executor:
         future_to_ticker = {executor.submit(fetch_single_ticker_info, t): t for t in _ticker_list}
         done_count = 0
         for future in as_completed(future_to_ticker):
@@ -341,7 +350,7 @@ if len(df) > 0 and len(tech_df) > 0:
 
 # Apply filters
 filtered_df = df.copy()
-if len(filtered_df) > 0:
+if len(filtered_df) > 0 and "sub_sector" in filtered_df.columns:
     filtered_df = filtered_df[filtered_df["sub_sector"].isin(sector_filter)]
     if search_query:
         sq = search_query.upper()
@@ -387,8 +396,9 @@ with tab1:
             col_labels = {"return_1w": "1W", "return_1m": "1M", "return_3m": "3M",
                           "return_6m": "6M", "ytd_return": "YTD", "return_1y": "1Y"}
             heat_data = sector_perf.set_index("sub_sector")[return_cols].rename(columns=col_labels)
-            # Build custom text matrix so NaN cells show "N/A" instead of blank
-            text_matrix = heat_data.applymap(lambda v: f"{v:.1f}" if pd.notna(v) else "N/A")
+            # Drop sectors where ALL return values are NaN
+            heat_data = heat_data.dropna(how="all")
+            text_matrix = heat_data.map(lambda v: f"{v:.1f}" if pd.notna(v) else "—")
             fig_heat = go.Figure(data=go.Heatmap(
                 z=heat_data.values, x=list(heat_data.columns), y=list(heat_data.index),
                 colorscale="RdYlGn", zmid=0, text=text_matrix.values, texttemplate="%{text}",
@@ -523,10 +533,12 @@ with tab2:
         leader_display = scored[[c for c in leader_cols if c in scored.columns]].copy()
         leader_display.columns = ["Ticker", "Name", "Sub-Sector", "Composite", "Growth", "Margin",
                                    "Rule40", "Momentum", "Valuation", "FCF"][:len(leader_display.columns)]
+        _sfmt = lambda x: f"{x:.0f}" if pd.notna(x) else ""
+        _sfmt1 = lambda x: f"{x:.1f}" if pd.notna(x) else ""
         st.dataframe(
             leader_display.style.format({
-                "Composite": "{:.1f}", "Growth": "{:.0f}", "Margin": "{:.0f}",
-                "Rule40": "{:.0f}", "Momentum": "{:.0f}", "Valuation": "{:.0f}", "FCF": "{:.0f}",
+                "Composite": _sfmt1, "Growth": _sfmt, "Margin": _sfmt,
+                "Rule40": _sfmt, "Momentum": _sfmt, "Valuation": _sfmt, "FCF": _sfmt,
             }).background_gradient(subset=["Composite"], cmap="RdYlGn", vmin=0, vmax=100),
             use_container_width=True, height=min(600, 35 * len(leader_display) + 38),
         )
@@ -534,6 +546,7 @@ with tab2:
         # ── EV/Revenue vs Revenue Growth Regression ──
         st.subheader("EV/Revenue vs Revenue Growth (Relative Valuation)")
         reg_df = filtered_df[filtered_df["revenueGrowth"].notna() & filtered_df["enterpriseToRevenue"].notna()].copy()
+        reg_df = reg_df[np.isfinite(reg_df["revenueGrowth"]) & np.isfinite(reg_df["enterpriseToRevenue"])]
         if len(reg_df) >= 5:
             reg_df["rev_growth_pct"] = reg_df["revenueGrowth"] * 100
             x = reg_df["rev_growth_pct"].values
@@ -576,10 +589,11 @@ with tab2:
                               "p_r40", "p_momentum", "p_valuation", "p_fcf"]].copy()
         pct_display.columns = ["Ticker", "Name", "Sub-Sector", "Rev Growth", "Profit Margin",
                                "Rule of 40", "YTD Momentum", "Valuation", "FCF Yield"]
+        _pf = lambda x: f"{x:.0f}" if pd.notna(x) else ""
         st.dataframe(
             pct_display.style.format({
-                "Rev Growth": "{:.0f}", "Profit Margin": "{:.0f}", "Rule of 40": "{:.0f}",
-                "YTD Momentum": "{:.0f}", "Valuation": "{:.0f}", "FCF Yield": "{:.0f}",
+                "Rev Growth": _pf, "Profit Margin": _pf, "Rule of 40": _pf,
+                "YTD Momentum": _pf, "Valuation": _pf, "FCF Yield": _pf,
             }).background_gradient(subset=["Rev Growth", "Profit Margin", "Rule of 40",
                                             "YTD Momentum", "Valuation", "FCF Yield"],
                                     cmap="RdYlGn", vmin=0, vmax=100),
@@ -597,7 +611,11 @@ with tab3:
     else:
         ticker_list = sorted(filtered_df["ticker"].tolist())
         selected_ticker = st.selectbox("Select a company", ticker_list, key="individual_ticker")
-        stock_row = filtered_df[filtered_df["ticker"] == selected_ticker].iloc[0]
+        stock_match = filtered_df[filtered_df["ticker"] == selected_ticker]
+        if len(stock_match) == 0:
+            st.warning(f"No data found for {selected_ticker}.")
+            st.stop()
+        stock_row = stock_match.iloc[0]
 
         price = stock_row.get("currentPrice")
         prev_close = stock_row.get("previousClose")
@@ -756,9 +774,12 @@ with tab3:
             fc1, fc2, fc3, fc4 = st.columns(4)
             with fc1:
                 st.markdown("**Margins**")
-                st.write(f"Gross: {safe_pct(stock_row.get('grossMargins', None) and stock_row['grossMargins'] * 100)}")
-                st.write(f"Operating: {safe_pct(stock_row.get('operatingMargins', None) and stock_row['operatingMargins'] * 100)}")
-                st.write(f"Profit: {safe_pct(stock_row.get('profitMargins', None) and stock_row['profitMargins'] * 100)}")
+                gm = stock_row.get("grossMargins")
+                st.write(f"Gross: {safe_pct(gm * 100 if pd.notna(gm) else None)}")
+                om = stock_row.get("operatingMargins")
+                st.write(f"Operating: {safe_pct(om * 100 if pd.notna(om) else None)}")
+                pm = stock_row.get("profitMargins")
+                st.write(f"Profit: {safe_pct(pm * 100 if pd.notna(pm) else None)}")
             with fc2:
                 st.markdown("**Valuation**")
                 st.write(f"P/E (Trailing): {safe_val(stock_row.get('trailingPE'), '.1f')}")
@@ -775,7 +796,8 @@ with tab3:
             with fc4:
                 st.markdown("**Balance Sheet**")
                 st.write(f"Debt/Equity: {safe_val(stock_row.get('debtToEquity'), '.1f')}")
-                st.write(f"ROE: {safe_pct(stock_row.get('returnOnEquity', None) and stock_row['returnOnEquity'] * 100)}")
+                roe = stock_row.get("returnOnEquity")
+                st.write(f"ROE: {safe_pct(roe * 100 if pd.notna(roe) else None)}")
                 st.write(f"FCF: {format_large_number(stock_row.get('freeCashflow'))}")
                 st.write(f"Beta: {safe_val(stock_row.get('beta'), '.2f')}")
 
@@ -1038,7 +1060,7 @@ with tab6:
                                    "1W %", "1M %", "3M %", "6M %", "YTD %"]
             st.dataframe(
                 mom_display.style.format({
-                    "Momentum Score": "{:.1f}", "1W %": lambda x: safe_pct(x),
+                    "Momentum Score": lambda x: f"{x:.1f}" if pd.notna(x) else "", "1W %": lambda x: safe_pct(x),
                     "1M %": lambda x: safe_pct(x), "3M %": lambda x: safe_pct(x),
                     "6M %": lambda x: safe_pct(x), "YTD %": lambda x: safe_pct(x),
                 }).background_gradient(subset=["Momentum Score"], cmap="RdYlGn", vmin=0, vmax=100),
