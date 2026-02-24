@@ -387,12 +387,14 @@ with tab1:
             col_labels = {"return_1w": "1W", "return_1m": "1M", "return_3m": "3M",
                           "return_6m": "6M", "ytd_return": "YTD", "return_1y": "1Y"}
             heat_data = sector_perf.set_index("sub_sector")[return_cols].rename(columns=col_labels)
-            fig_heat = px.imshow(
-                heat_data.values, x=list(heat_data.columns), y=list(heat_data.index),
-                color_continuous_scale="RdYlGn", color_continuous_midpoint=0,
-                text_auto=".1f", aspect="auto",
-                labels=dict(color="Median Return %"),
-            )
+            # Build custom text matrix so NaN cells show "N/A" instead of blank
+            text_matrix = heat_data.applymap(lambda v: f"{v:.1f}" if pd.notna(v) else "N/A")
+            fig_heat = go.Figure(data=go.Heatmap(
+                z=heat_data.values, x=list(heat_data.columns), y=list(heat_data.index),
+                colorscale="RdYlGn", zmid=0, text=text_matrix.values, texttemplate="%{text}",
+                hovertemplate="<b>%{y}</b><br>%{x}: %{z:.1f}%<extra></extra>",
+                colorbar=dict(title="Median Return %"),
+            ))
             fig_heat.update_layout(height=max(350, 40 * len(heat_data)), margin=dict(t=20, l=200, r=10, b=10))
             st.plotly_chart(fig_heat, use_container_width=True)
         else:
