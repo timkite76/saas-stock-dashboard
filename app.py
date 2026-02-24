@@ -393,7 +393,7 @@ with tab1:
                 text_auto=".1f", aspect="auto",
                 labels=dict(color="Median Return %"),
             )
-            fig_heat.update_layout(height=max(350, 40 * len(heat_data)), margin=dict(t=20, l=10, r=10, b=10))
+            fig_heat.update_layout(height=max(350, 40 * len(heat_data)), margin=dict(t=20, l=200, r=10, b=10))
             st.plotly_chart(fig_heat, use_container_width=True)
         else:
             st.info("Technical data not available for sector heatmap.")
@@ -403,20 +403,28 @@ with tab1:
         if "range_52w_pct" in filtered_df.columns:
             range_df = filtered_df[filtered_df["range_52w_pct"].notna()].sort_values("range_52w_pct", ascending=True).copy()
             if len(range_df) > 0:
+                range_view = st.radio("Show", ["Bottom 25 (nearest 52W low)", "Top 25 (nearest 52W high)", "All"],
+                                       horizontal=True, key="range_view")
+                if range_view.startswith("Bottom"):
+                    range_plot = range_df.head(25)
+                elif range_view.startswith("Top"):
+                    range_plot = range_df.tail(25)
+                else:
+                    range_plot = range_df
                 fig_range = go.Figure()
                 fig_range.add_trace(go.Bar(
-                    y=range_df["ticker"], x=range_df["range_52w_pct"], orientation="h",
+                    y=range_plot["ticker"], x=range_plot["range_52w_pct"], orientation="h",
                     marker=dict(
-                        color=range_df["range_52w_pct"],
+                        color=range_plot["range_52w_pct"],
                         colorscale=[[0, "#ef4444"], [0.5, "#eab308"], [1, "#22c55e"]],
                         cmin=0, cmax=100,
                     ),
-                    text=range_df["range_52w_pct"].apply(lambda x: f"{x:.0f}%"),
+                    text=range_plot["range_52w_pct"].apply(lambda x: f"{x:.0f}%"),
                     textposition="outside",
                     hovertemplate="<b>%{y}</b><br>Position: %{x:.1f}%<extra></extra>",
                 ))
                 fig_range.update_layout(
-                    height=max(400, 18 * len(range_df)), xaxis_title="Position in 52-Week Range (%)",
+                    height=max(400, 22 * len(range_plot)), xaxis_title="Position in 52-Week Range (%)",
                     xaxis=dict(range=[0, 110]), yaxis_title="", margin=dict(t=20, l=10, r=10, b=10),
                 )
                 st.plotly_chart(fig_range, use_container_width=True)
@@ -608,12 +616,13 @@ with tab3:
 
         # Price chart with optional drawdown overlay
         st.subheader(f"{selected_ticker} Price Chart")
-        chart_col1, chart_col2 = st.columns([3, 1])
-        with chart_col2:
-            chart_type = st.radio("Chart type", ["Line", "Candlestick"], horizontal=True, key="chart_type")
-            show_drawdown = st.checkbox("Show drawdown overlay", value=False, key="show_dd")
-        with chart_col1:
+        pc1, pc2, pc3 = st.columns([2, 2, 1])
+        with pc1:
             selected_period = PERIOD_OPTIONS[st.selectbox("Date Range", list(PERIOD_OPTIONS.keys()), index=4, key="individual_period")]
+        with pc2:
+            chart_type = st.radio("Chart type", ["Line", "Candlestick"], horizontal=True, key="chart_type")
+        with pc3:
+            show_drawdown = st.checkbox("Show drawdown", value=False, key="show_dd")
 
         with st.spinner(f"Loading {selected_ticker} price data..."):
             price_data = fetch_price_history(selected_ticker, selected_period)
@@ -1124,16 +1133,23 @@ with tab6:
                 st.caption("Largest peak-to-trough decline in the past 6 months. Less negative = more resilient.")
                 dd_df = filtered_df[filtered_df["max_drawdown_6m"].notna()].sort_values("max_drawdown_6m").copy()
                 if len(dd_df) > 0:
+                    dd_view = st.radio("Show", ["Worst 25", "Best 25", "All"], horizontal=True, key="dd_view")
+                    if dd_view == "Worst 25":
+                        dd_plot = dd_df.head(25)
+                    elif dd_view == "Best 25":
+                        dd_plot = dd_df.tail(25)
+                    else:
+                        dd_plot = dd_df
                     fig_dd = go.Figure()
-                    colors = ["#ef4444" if v < -20 else "#f59e0b" if v < -10 else "#22c55e" for v in dd_df["max_drawdown_6m"]]
+                    colors = ["#ef4444" if v < -20 else "#f59e0b" if v < -10 else "#22c55e" for v in dd_plot["max_drawdown_6m"]]
                     fig_dd.add_trace(go.Bar(
-                        y=dd_df["ticker"], x=dd_df["max_drawdown_6m"], orientation="h",
+                        y=dd_plot["ticker"], x=dd_plot["max_drawdown_6m"], orientation="h",
                         marker_color=colors,
-                        text=dd_df["max_drawdown_6m"].apply(lambda x: f"{x:.1f}%"),
+                        text=dd_plot["max_drawdown_6m"].apply(lambda x: f"{x:.1f}%"),
                         textposition="outside",
                     ))
                     fig_dd.update_layout(
-                        height=max(400, 18 * len(dd_df)), xaxis_title="Max Drawdown %",
+                        height=max(400, 22 * len(dd_plot)), xaxis_title="Max Drawdown %",
                         margin=dict(t=20, l=10, r=10, b=10),
                     )
                     st.plotly_chart(fig_dd, use_container_width=True)
