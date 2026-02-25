@@ -399,6 +399,7 @@ st.sidebar.markdown(f"**Showing {len(filtered_df)} of {len(df)} companies**")
 TAB_NAMES = [
     "Market Overview", "Scores & Rankings", "Individual Stock",
     "Multi-Stock Comparison", "SaaS Screener", "Momentum & Signals",
+    "Factor Analysis",
 ]
 selected_tab = st.radio("Navigation", TAB_NAMES, horizontal=True,
                          key="active_tab", label_visibility="collapsed")
@@ -1234,3 +1235,185 @@ if selected_tab == "Momentum & Signals":
                         margin=dict(t=20, l=10, r=10, b=10),
                     )
                     st.plotly_chart(fig_dd, use_container_width=True)
+
+
+# ─────────────────────────────────────────────
+# TAB 7 — FACTOR ANALYSIS (Barra-style)
+# ─────────────────────────────────────────────
+if selected_tab == "Factor Analysis":
+    st.header("Factor Analysis")
+    st.caption("Barra/MSCI-style risk factor exposures derived from fundamentals and price data. Each score is a percentile rank (0–100) within the current universe.")
+    if len(filtered_df) == 0:
+        st.warning("No data available. Adjust your filters.")
+    else:
+        fa = filtered_df.copy()
+
+        # ── Compute sub-factor percentile ranks ──
+        # Momentum
+        mom_cols = [c for c in ["return_1m", "return_3m", "return_6m"] if c in fa.columns]
+        for c in mom_cols:
+            fa[f"_p_{c}"] = pct_rank(fa[c])
+        if mom_cols:
+            fa["f_momentum"] = fa[[f"_p_{c}" for c in mom_cols]].mean(axis=1)
+        else:
+            fa["f_momentum"] = np.nan
+
+        # Value (inverted: cheap = high score)
+        val_parts = []
+        if "trailingPE" in fa.columns:
+            fa["_earnings_yield"] = np.where(fa["trailingPE"].notna() & (fa["trailingPE"] > 0), 1.0 / fa["trailingPE"], np.nan)
+            fa["_p_ey"] = pct_rank(fa["_earnings_yield"])
+            val_parts.append("_p_ey")
+        if "enterpriseToRevenue" in fa.columns:
+            fa["_inv_ev_rev"] = np.where(fa["enterpriseToRevenue"].notna() & (fa["enterpriseToRevenue"] > 0), 1.0 / fa["enterpriseToRevenue"], np.nan)
+            fa["_p_inv_ev_rev"] = pct_rank(fa["_inv_ev_rev"])
+            val_parts.append("_p_inv_ev_rev")
+        if "priceToSalesTrailing12Months" in fa.columns:
+            fa["_inv_ps"] = np.where(fa["priceToSalesTrailing12Months"].notna() & (fa["priceToSalesTrailing12Months"] > 0), 1.0 / fa["priceToSalesTrailing12Months"], np.nan)
+            fa["_p_inv_ps"] = pct_rank(fa["_inv_ps"])
+            val_parts.append("_p_inv_ps")
+        fa["f_value"] = fa[val_parts].mean(axis=1) if val_parts else np.nan
+
+        # Size (log market cap)
+        if "marketCap" in fa.columns:
+            fa["_log_mcap"] = np.where(fa["marketCap"].notna() & (fa["marketCap"] > 0), np.log10(fa["marketCap"]), np.nan)
+            fa["f_size"] = pct_rank(fa["_log_mcap"])
+        else:
+            fa["f_size"] = np.nan
+
+        # Quality
+        qual_parts = []
+        for qc in ["profitMargins", "returnOnEquity", "fcf_yield"]:
+            if qc in fa.columns:
+                fa[f"_p_{qc}"] = pct_rank(fa[qc])
+                qual_parts.append(f"_p_{qc}")
+        fa["f_quality"] = fa[qual_parts].mean(axis=1) if qual_parts else np.nan
+
+        # Growth
+        grow_parts = []
+        for gc in ["revenueGrowth", "projected_rev_growth_nfy"]:
+            if gc in fa.columns:
+                fa[f"_p_{gc}"] = pct_rank(fa[gc])
+                grow_parts.append(f"_p_{gc}")
+        fa["f_growth"] = fa[grow_parts].mean(axis=1) if grow_parts else np.nan
+
+        # Volatility (higher = riskier)
+        vol_parts = []
+        if "beta" in fa.columns:
+            fa["_p_beta"] = pct_rank(fa["beta"])
+            vol_parts.append("_p_beta")
+        if "max_drawdown_6m" in fa.columns:
+            fa["_neg_dd"] = -fa["max_drawdown_6m"]  # more negative drawdown → higher risk
+            fa["_p_dd"] = pct_rank(fa["_neg_dd"])
+            vol_parts.append("_p_dd")
+        fa["f_volatility"] = fa[vol_parts].mean(axis=1) if vol_parts else np.nan
+
+        # Leverage
+        if "debtToEquity" in fa.columns:
+            fa["f_leverage"] = pct_rank(fa["debtToEquity"])
+        else:
+            fa["f_leverage"] = np.nan
+
+        FACTOR_COLS = ["f_momentum", "f_value", "f_size", "f_quality", "f_growth", "f_volatility", "f_leverage"]
+        FACTOR_LABELS = {"f_momentum": "Momentum", "f_value": "Value", "f_size": "Size",
+                         "f_quality": "Quality", "f_growth": "Growth",
+                         "f_volatility": "Volatility", "f_leverage": "Leverage"}
+
+        # ── KPI Row: Median factor scores ──
+        st.subheader("Universe Median Factor Scores")
+        kpi_cols = st.columns(len(FACTOR_COLS))
+        for i, fc in enumerate(FACTOR_COLS):
+            med = fa[fc].median()
+            kpi_cols[i].metric(FACTOR_LABELS[fc], f"{med:.1f}" if pd.notna(med) else "N/A")
+
+        # ── Factor Exposure Heatmap ──
+        st.subheader("Factor Exposure Heatmap")
+        st.caption("Each cell shows the percentile rank (0–100) for a stock on a given factor. Colors diverge around 50 (universe median).")
+        heat_df = fa[["ticker"] + FACTOR_COLS].set_index("ticker").rename(columns=FACTOR_LABELS)
+        heat_df = heat_df.dropna(how="all")
+        if len(heat_df) > 0:
+            fig_heat = px.imshow(
+                heat_df.values,
+                x=heat_df.columns.tolist(),
+                y=heat_df.index.tolist(),
+                color_continuous_scale="RdYlGn",
+                zmin=0, zmax=100,
+                aspect="auto",
+                text_auto=".0f",
+            )
+            fig_heat.update_coloraxes(cmid=50)
+            fig_heat.update_layout(
+                height=max(400, 22 * len(heat_df)),
+                margin=dict(t=20, l=10, r=10, b=10),
+            )
+            st.plotly_chart(fig_heat, use_container_width=True)
+        else:
+            st.info("Not enough data for heatmap.")
+
+        # ── Sector Factor Profile ──
+        st.subheader("Sector Factor Profile")
+        st.caption("Median factor score per sector. Identifies systematic style tilts across sectors.")
+        if "sub_sector" in fa.columns:
+            sector_agg = fa.groupby("sub_sector")[FACTOR_COLS].median().reset_index()
+            sector_melt = sector_agg.melt(id_vars="sub_sector", value_vars=FACTOR_COLS,
+                                           var_name="Factor", value_name="Score")
+            sector_melt["Factor"] = sector_melt["Factor"].map(FACTOR_LABELS)
+            fig_sector = px.bar(
+                sector_melt, x="sub_sector", y="Score", color="Factor",
+                barmode="group", color_discrete_sequence=px.colors.qualitative.Set2,
+            )
+            fig_sector.update_layout(
+                height=450, xaxis_title="", yaxis_title="Median Score (0–100)",
+                margin=dict(t=20, l=10, r=10, b=10),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+            )
+            st.plotly_chart(fig_sector, use_container_width=True)
+
+        # ── Factor Scatter ──
+        st.subheader("Factor Scatter")
+        sc1, sc2 = st.columns(2)
+        factor_options = [FACTOR_LABELS[f] for f in FACTOR_COLS]
+        x_factor = sc1.selectbox("X-Axis Factor", factor_options, index=0, key="fa_x")
+        y_factor = sc2.selectbox("Y-Axis Factor", factor_options, index=3, key="fa_y")
+        x_col = [k for k, v in FACTOR_LABELS.items() if v == x_factor][0]
+        y_col = [k for k, v in FACTOR_LABELS.items() if v == y_factor][0]
+        scatter_df = fa[["ticker", "sub_sector", x_col, y_col]].dropna(subset=[x_col, y_col])
+        if len(scatter_df) > 0:
+            fig_scatter = px.scatter(
+                scatter_df, x=x_col, y=y_col, text="ticker",
+                color="sub_sector" if "sub_sector" in scatter_df.columns else None,
+                color_discrete_sequence=px.colors.qualitative.Set2,
+            )
+            fig_scatter.update_traces(textposition="top center", marker=dict(size=10))
+            fig_scatter.update_layout(
+                xaxis_title=x_factor, yaxis_title=y_factor,
+                height=500, margin=dict(t=20, l=10, r=10, b=10),
+                legend_title_text="Sector",
+            )
+            # Add quadrant lines at 50
+            fig_scatter.add_hline(y=50, line_dash="dash", line_color="gray", opacity=0.5)
+            fig_scatter.add_vline(x=50, line_dash="dash", line_color="gray", opacity=0.5)
+            st.plotly_chart(fig_scatter, use_container_width=True)
+        else:
+            st.info("Not enough data for scatter plot.")
+
+        # ── Detailed Factor Table ──
+        st.subheader("Detailed Factor Scores")
+        table_cols = ["ticker", "shortName"]
+        if "sub_sector" in fa.columns:
+            table_cols.append("sub_sector")
+        table_cols += FACTOR_COLS
+        factor_table = fa[table_cols].copy()
+        factor_table = factor_table.rename(columns={**FACTOR_LABELS, "ticker": "Ticker",
+                                                     "shortName": "Name", "sub_sector": "Sub-Sector"})
+        display_factor_cols = list(FACTOR_LABELS.values())
+        factor_table["Composite"] = factor_table[display_factor_cols].mean(axis=1)
+        factor_table = factor_table.sort_values("Composite", ascending=False).reset_index(drop=True)
+        factor_table.index = range(1, len(factor_table) + 1)
+        fmt = {c: lambda x: f"{x:.1f}" if pd.notna(x) else "" for c in display_factor_cols + ["Composite"]}
+        st.dataframe(
+            factor_table.style.format(fmt).background_gradient(
+                subset=display_factor_cols + ["Composite"], cmap="RdYlGn", vmin=0, vmax=100,
+            ),
+            use_container_width=True, height=min(700, 35 * len(factor_table) + 38),
+        )
