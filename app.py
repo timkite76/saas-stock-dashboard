@@ -16,27 +16,27 @@ st.set_page_config(page_title="SaaS Stock Dashboard", layout="wide", page_icon="
 # ─────────────────────────────────────────────
 SAAS_COMPANIES = {
     "Enterprise Application Software": [
-        "ADBE", "CRM", "NOW", "WDAY", "INTU", "ADSK", "ANSS", "TYL", "MANH",
+        "ADBE", "CRM", "NOW", "WDAY", "INTU", "ADSK", "TYL", "MANH",
         "GWRE", "PCOR", "DOCU", "ORCL", "SAP", "DBX", "BOX", "PTC", "WK", "AGYS",
     ],
     "Cybersecurity & Identity": [
         "CRWD", "PANW", "ZS", "FTNT", "S", "CYBR", "TENB", "QLYS", "RPD", "VRNS",
-        "OKTA", "RBRK", "SAIL", "CLBT", "SWI", "RDWR", "FSLY",
+        "OKTA", "RBRK", "SAIL", "CLBT", "RDWR", "FSLY",
     ],
     "Cloud Infrastructure & DevOps": [
         "DDOG", "NET", "MDB", "SNOW", "CFLT", "ESTC", "PATH", "DT", "GTLB", "MNDY",
         "FROG", "DOCN", "NTNX", "AVPT", "OS", "PD",
     ],
     "Communications & Collaboration": [
-        "ZM", "TEAM", "TWLO", "RNG", "ZI", "FIVN", "BAND", "NICE", "BRZE",
+        "ZM", "TEAM", "TWLO", "RNG", "FIVN", "BAND", "NICE", "BRZE",
         "ASAN", "LPSN", "CXM",
     ],
     "Financial Technology SaaS": [
-        "BILL", "PAYC", "PCTY", "TOST", "SQ", "FOUR", "FLYW", "NCNO", "ALKT",
-        "VERX", "ZUO", "AFRM", "TTAN",
+        "BILL", "PAYC", "PCTY", "TOST", "XYZ", "FOUR", "FLYW", "NCNO", "ALKT",
+        "VERX", "AFRM", "TTAN",
     ],
     "Marketing, Commerce & CX": [
-        "HUBS", "SHOP", "TTD", "SEMR", "SPSC", "BIGC", "VTEX", "CWAN",
+        "HUBS", "SHOP", "TTD", "SEMR", "SPSC", "VTEX", "CWAN",
         "KVYO", "GLBE", "WIX", "APP", "SPT", "ZETA",
     ],
     "Healthcare & Life Sciences": [
@@ -44,15 +44,15 @@ SAAS_COMPANIES = {
         "NTRA", "HCAT", "WEAV",
     ],
     "Human Capital Management": [
-        "CDAY", "APPF", "PYCR",
+        "DAY", "APPF", "PYCR",
     ],
     "Data Analytics & AI": [
-        "DOMO", "PLTR", "AI", "ALTR", "FRSH", "SQSP", "IOT",
+        "DOMO", "PLTR", "AI", "FRSH", "IOT",
         "SOUN", "BBAI", "DUOL",
     ],
     "Vertical / Specialized SaaS": [
         "CSGP", "BSY", "QTWO", "DCBO", "BL", "DV", "INTA", "JAMF",
-        "OLO", "PRGS", "EVBG",
+        "PRGS",
     ],
 }
 
@@ -131,30 +131,22 @@ INFO_FIELDS = [
 ]
 
 
+def _fetch_ticker_info_once(ticker: str) -> Optional[dict]:
+    t = yf.Ticker(ticker)
+    info = t.info
+    if not info or info.get("regularMarketPrice") is None and info.get("currentPrice") is None:
+        return None
+    row = {"ticker": ticker}
+    for field in INFO_FIELDS:
+        row[field] = info.get(field)
+    price = row.get("currentPrice") or row.get("regularMarketPrice")
+    row["currentPrice"] = price
+    return row
+
+
 def fetch_single_ticker_info(ticker: str) -> Optional[dict]:
     try:
-        t = yf.Ticker(ticker)
-        info = t.info
-        if not info or info.get("regularMarketPrice") is None and info.get("currentPrice") is None:
-            return None
-        row = {"ticker": ticker}
-        for field in INFO_FIELDS:
-            row[field] = info.get(field)
-        price = row.get("currentPrice") or row.get("regularMarketPrice")
-        row["currentPrice"] = price
-        try:
-            hist = t.history(period="ytd")
-            if hist is not None and len(hist) > 0:
-                first_close = hist["Close"].iloc[0]
-                if first_close and first_close > 0 and price:
-                    row["ytd_return"] = ((price - first_close) / first_close) * 100
-                else:
-                    row["ytd_return"] = None
-            else:
-                row["ytd_return"] = None
-        except Exception:
-            row["ytd_return"] = None
-        return row
+        return _fetch_ticker_info_once(ticker)
     except Exception:
         return None
 
@@ -164,7 +156,9 @@ def fetch_all_fundamentals(_ticker_list: tuple) -> tuple:
     results, unavailable = [], []
     progress_bar = st.progress(0, text="Fetching stock data...")
     total = len(_ticker_list)
-    with ThreadPoolExecutor(max_workers=5) as executor:
+
+    # Pass 1: fast parallel fetch
+    with ThreadPoolExecutor(max_workers=2) as executor:
         future_to_ticker = {executor.submit(fetch_single_ticker_info, t): t for t in _ticker_list}
         done_count = 0
         for future in as_completed(future_to_ticker):
@@ -179,9 +173,35 @@ def fetch_all_fundamentals(_ticker_list: tuple) -> tuple:
                     unavailable.append(ticker)
             except Exception:
                 unavailable.append(ticker)
+
     progress_bar.empty()
     df = pd.DataFrame(results)
     if len(df) > 0:
+        # Batch YTD return: single yf.download() call instead of per-ticker history
+        df["ytd_return"] = np.nan
+        try:
+            tickers_for_ytd = df["ticker"].tolist()
+            ytd_data = yf.download(tickers_for_ytd, period="ytd", auto_adjust=True, progress=False, group_by="ticker")
+            if ytd_data is not None and len(ytd_data) > 0:
+                single_ticker = not isinstance(ytd_data.columns, pd.MultiIndex) or len(tickers_for_ytd) == 1
+                for ticker in tickers_for_ytd:
+                    try:
+                        if single_ticker:
+                            close = ytd_data["Close"].dropna()
+                        else:
+                            if ticker not in ytd_data.columns.get_level_values(0):
+                                continue
+                            close = ytd_data[(ticker, "Close")].dropna()
+                        if len(close) > 0:
+                            first_close = close.iloc[0]
+                            current_price = df.loc[df["ticker"] == ticker, "currentPrice"].iloc[0]
+                            if pd.notna(first_close) and first_close > 0 and pd.notna(current_price):
+                                ytd_ret = ((current_price - first_close) / first_close) * 100
+                                df.loc[df["ticker"] == ticker, "ytd_return"] = ytd_ret
+                    except Exception:
+                        continue
+        except Exception:
+            pass
         df["sub_sector"] = df["ticker"].map(TICKER_TO_SECTOR)
         df["bvp_index"] = df["ticker"].isin(BVP_INDEX_TICKERS)
         df["rule_of_40"] = np.where(
@@ -199,7 +219,14 @@ def fetch_all_fundamentals(_ticker_list: tuple) -> tuple:
             df["freeCashflow"].notna() & df["marketCap"].notna() & (df["marketCap"] > 0),
             df["freeCashflow"] / df["marketCap"] * 100, np.nan,
         )
+        # Projected YoY growth (derived from analyst forward vs trailing EPS)
+        df["projected_rev_growth_nfy"] = np.where(
+            df["forwardEps"].notna() & df["trailingEps"].notna() & (df["trailingEps"].abs() > 0.01),
+            (df["forwardEps"] - df["trailingEps"]) / df["trailingEps"].abs() * 100,
+            np.nan,
+        )
     return df, unavailable
+
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -335,6 +362,10 @@ st.sidebar.caption(f"Tracking {len(ALL_TICKERS)} tickers")
 # Load fundamental data
 df, unavailable_tickers = fetch_all_fundamentals(tuple(ALL_TICKERS))
 
+# Ensure projected growth column exists (may be absent from stale cache)
+if len(df) > 0 and "projected_rev_growth_nfy" not in df.columns:
+    df["projected_rev_growth_nfy"] = np.nan
+
 if unavailable_tickers:
     with st.sidebar.expander(f"Unavailable tickers ({len(unavailable_tickers)})"):
         st.write(", ".join(sorted(unavailable_tickers)))
@@ -363,18 +394,20 @@ st.sidebar.markdown(f"**Showing {len(filtered_df)} of {len(df)} companies**")
 
 
 # ─────────────────────────────────────────────
-# TABS
+# TAB NAVIGATION (session-state persisted)
 # ─────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+TAB_NAMES = [
     "Market Overview", "Scores & Rankings", "Individual Stock",
     "Multi-Stock Comparison", "SaaS Screener", "Momentum & Signals",
-])
+]
+selected_tab = st.radio("Navigation", TAB_NAMES, horizontal=True,
+                         key="active_tab", label_visibility="collapsed")
 
 
 # ─────────────────────────────────────────────
 # TAB 1 — MARKET OVERVIEW (enhanced)
 # ─────────────────────────────────────────────
-with tab1:
+if selected_tab == "Market Overview":
     st.header("SaaS Market Overview")
     if len(filtered_df) == 0:
         st.warning("No data available. Adjust your filters.")
@@ -489,7 +522,7 @@ with tab1:
 # ─────────────────────────────────────────────
 # TAB 2 — SCORES & RANKINGS
 # ─────────────────────────────────────────────
-with tab2:
+if selected_tab == "Scores & Rankings":
     st.header("Scores & Rankings")
     if len(filtered_df) == 0:
         st.warning("No data available. Adjust your filters.")
@@ -604,7 +637,7 @@ with tab2:
 # ─────────────────────────────────────────────
 # TAB 3 — INDIVIDUAL STOCK (enhanced)
 # ─────────────────────────────────────────────
-with tab3:
+if selected_tab == "Individual Stock":
     st.header("Individual Stock Analysis")
     if len(filtered_df) == 0:
         st.warning("No data available. Adjust your filters.")
@@ -805,7 +838,7 @@ with tab3:
 # ─────────────────────────────────────────────
 # TAB 4 — MULTI-STOCK COMPARISON (enhanced)
 # ─────────────────────────────────────────────
-with tab4:
+if selected_tab == "Multi-Stock Comparison":
     st.header("Multi-Stock Comparison")
     if len(filtered_df) == 0:
         st.warning("No data available. Adjust your filters.")
@@ -936,103 +969,127 @@ with tab4:
 # ─────────────────────────────────────────────
 # TAB 5 — SAAS SCREENER
 # ─────────────────────────────────────────────
-with tab5:
+@st.fragment
+def render_screener(data_df):
+    sf1, sf2, sf3, sf4, sf5, sf6 = st.columns(6)
+    with sf1:
+        pe_range = st.slider("P/E Range", 0.0, 500.0, (0.0, 500.0), step=5.0, key="pe_range")
+    with sf2:
+        rev_growth_range = st.slider("Rev Growth %", -50.0, 200.0, (-50.0, 200.0), step=5.0, key="rg_range")
+    with sf3:
+        margin_range = st.slider("Profit Margin %", -100.0, 60.0, (-100.0, 60.0), step=5.0, key="margin_range")
+    with sf4:
+        rule40_min = st.slider("Min Rule of 40", -50.0, 100.0, -50.0, step=5.0, key="rule40_min")
+    with sf5:
+        ev_rev_range = st.slider("EV/Revenue", 0.0, 100.0, (0.0, 100.0), step=1.0, key="ev_rev_range")
+    with sf6:
+        proj_growth_range = st.slider("Proj. Growth NFY %", -50.0, 200.0, (-50.0, 200.0), step=5.0, key="proj_growth_range")
+    sf7, _, _, _, _, _ = st.columns(6)
+    with sf7:
+        debt_eq_range = st.slider("Debt/Equity", 0.0, 500.0, (0.0, 500.0), step=10.0, key="debt_eq_range")
+
+    screened = data_df.copy()
+    screened = screened[
+        (screened["trailingPE"].isna())
+        | ((screened["trailingPE"] >= pe_range[0]) & (screened["trailingPE"] <= pe_range[1]))
+    ]
+    screened = screened[
+        (screened["revenueGrowth"].isna())
+        | ((screened["revenueGrowth"] * 100 >= rev_growth_range[0])
+           & (screened["revenueGrowth"] * 100 <= rev_growth_range[1]))
+    ]
+    screened = screened[
+        (screened["profitMargins"].isna())
+        | ((screened["profitMargins"] * 100 >= margin_range[0])
+           & (screened["profitMargins"] * 100 <= margin_range[1]))
+    ]
+    screened = screened[
+        (screened["rule_of_40"].isna()) | (screened["rule_of_40"] >= rule40_min)
+    ]
+    screened = screened[
+        (screened["enterpriseToRevenue"].isna())
+        | ((screened["enterpriseToRevenue"] >= ev_rev_range[0])
+           & (screened["enterpriseToRevenue"] <= ev_rev_range[1]))
+    ]
+    screened = screened[
+        (screened["projected_rev_growth_nfy"].isna())
+        | ((screened["projected_rev_growth_nfy"] >= proj_growth_range[0])
+           & (screened["projected_rev_growth_nfy"] <= proj_growth_range[1]))
+    ]
+    screened = screened[
+        (screened["debtToEquity"].isna())
+        | ((screened["debtToEquity"] >= debt_eq_range[0])
+           & (screened["debtToEquity"] <= debt_eq_range[1]))
+    ]
+
+    st.markdown(f"**{len(screened)} companies match your criteria**")
+
+    scatter_df = screened[screened["revenueGrowth"].notna() & screened["profitMargins"].notna()].copy()
+    if len(scatter_df) > 0:
+        scatter_df["rev_growth_pct"] = scatter_df["revenueGrowth"] * 100
+        scatter_df["profit_margin_pct"] = scatter_df["profitMargins"] * 100
+        scatter_df["mcap_size"] = scatter_df["marketCap"].clip(upper=scatter_df["marketCap"].quantile(0.95)).fillna(1e9)
+        fig_scatter = px.scatter(
+            scatter_df, x="rev_growth_pct", y="profit_margin_pct",
+            size="mcap_size", color="sub_sector",
+            hover_data={"ticker": True, "shortName": True, "rev_growth_pct": ":.1f",
+                        "profit_margin_pct": ":.1f", "mcap_size": False},
+            labels={"rev_growth_pct": "Revenue Growth %", "profit_margin_pct": "Profit Margin %"},
+            title="Revenue Growth vs Profit Margin (size = Market Cap)",
+        )
+        fig_scatter.add_shape(
+            type="line", x0=-10, y0=50, x1=50, y1=-10,
+            line=dict(color="gray", width=2, dash="dash"),
+        )
+        fig_scatter.add_annotation(
+            x=5, y=38, text="Rule of 40", showarrow=False, font=dict(color="gray", size=12),
+        )
+        fig_scatter.update_layout(height=600, margin=dict(t=40, l=10, r=10, b=10))
+        st.plotly_chart(fig_scatter, use_container_width=True)
+
+    st.subheader("Screened Results")
+    screen_display = screened[["ticker", "shortName", "sub_sector", "currentPrice",
+                                "marketCap", "trailingPE", "ytd_return", "revenueGrowth",
+                                "projected_rev_growth_nfy", "profitMargins", "rule_of_40",
+                                "enterpriseToRevenue", "debtToEquity"]].copy()
+    screen_display.columns = ["Ticker", "Name", "Sub-Sector", "Price", "Market Cap",
+                              "P/E", "YTD %", "Rev Growth", "Proj. Growth NFY",
+                              "Profit Margin", "Rule of 40", "EV/Revenue", "D/E"]
+    screen_display = screen_display.sort_values("Market Cap", ascending=False).reset_index(drop=True)
+    screen_display.index = range(1, len(screen_display) + 1)
+    st.dataframe(
+        screen_display.style.format({
+            "Price": lambda x: f"${x:.2f}" if pd.notna(x) else "N/A",
+            "Market Cap": lambda x: format_large_number(x),
+            "P/E": lambda x: safe_val(x, ".1f"), "YTD %": lambda x: safe_pct(x),
+            "Rev Growth": lambda x: safe_pct(x * 100 if pd.notna(x) else None),
+            "Proj. Growth NFY": lambda x: safe_pct(x),
+            "Profit Margin": lambda x: safe_pct(x * 100 if pd.notna(x) else None),
+            "Rule of 40": lambda x: safe_val(x, ".1f"), "EV/Revenue": lambda x: safe_val(x, ".1f"),
+            "D/E": lambda x: safe_val(x, ".1f"),
+        }),
+        use_container_width=True, height=min(600, 35 * len(screen_display) + 38),
+    )
+
+    csv = screened.to_csv(index=False)
+    st.download_button(
+        label="Export filtered results as CSV", data=csv,
+        file_name=f"saas_screener_{datetime.now().strftime('%Y%m%d')}.csv", mime="text/csv",
+    )
+
+
+if selected_tab == "SaaS Screener":
     st.header("SaaS Screener")
     if len(filtered_df) == 0:
         st.warning("No data available. Adjust your filters.")
     else:
-        sf1, sf2, sf3, sf4, sf5 = st.columns(5)
-        with sf1:
-            pe_range = st.slider("P/E Range", 0.0, 500.0, (0.0, 500.0), step=5.0, key="pe_range")
-        with sf2:
-            rev_growth_range = st.slider("Rev Growth %", -50.0, 200.0, (-50.0, 200.0), step=5.0, key="rg_range")
-        with sf3:
-            margin_range = st.slider("Profit Margin %", -100.0, 60.0, (-100.0, 60.0), step=5.0, key="margin_range")
-        with sf4:
-            rule40_min = st.slider("Min Rule of 40", -50.0, 100.0, -50.0, step=5.0, key="rule40_min")
-        with sf5:
-            ev_rev_range = st.slider("EV/Revenue", 0.0, 100.0, (0.0, 100.0), step=1.0, key="ev_rev_range")
-
-        screened = filtered_df.copy()
-        screened = screened[
-            (screened["trailingPE"].isna())
-            | ((screened["trailingPE"] >= pe_range[0]) & (screened["trailingPE"] <= pe_range[1]))
-        ]
-        screened = screened[
-            (screened["revenueGrowth"].isna())
-            | ((screened["revenueGrowth"] * 100 >= rev_growth_range[0])
-               & (screened["revenueGrowth"] * 100 <= rev_growth_range[1]))
-        ]
-        screened = screened[
-            (screened["profitMargins"].isna())
-            | ((screened["profitMargins"] * 100 >= margin_range[0])
-               & (screened["profitMargins"] * 100 <= margin_range[1]))
-        ]
-        screened = screened[
-            (screened["rule_of_40"].isna()) | (screened["rule_of_40"] >= rule40_min)
-        ]
-        screened = screened[
-            (screened["enterpriseToRevenue"].isna())
-            | ((screened["enterpriseToRevenue"] >= ev_rev_range[0])
-               & (screened["enterpriseToRevenue"] <= ev_rev_range[1]))
-        ]
-
-        st.markdown(f"**{len(screened)} companies match your criteria**")
-
-        scatter_df = screened[screened["revenueGrowth"].notna() & screened["profitMargins"].notna()].copy()
-        if len(scatter_df) > 0:
-            scatter_df["rev_growth_pct"] = scatter_df["revenueGrowth"] * 100
-            scatter_df["profit_margin_pct"] = scatter_df["profitMargins"] * 100
-            scatter_df["mcap_size"] = scatter_df["marketCap"].clip(upper=scatter_df["marketCap"].quantile(0.95)).fillna(1e9)
-            fig_scatter = px.scatter(
-                scatter_df, x="rev_growth_pct", y="profit_margin_pct",
-                size="mcap_size", color="sub_sector",
-                hover_data={"ticker": True, "shortName": True, "rev_growth_pct": ":.1f",
-                            "profit_margin_pct": ":.1f", "mcap_size": False},
-                labels={"rev_growth_pct": "Revenue Growth %", "profit_margin_pct": "Profit Margin %"},
-                title="Revenue Growth vs Profit Margin (size = Market Cap)",
-            )
-            fig_scatter.add_shape(
-                type="line", x0=-10, y0=50, x1=50, y1=-10,
-                line=dict(color="gray", width=2, dash="dash"),
-            )
-            fig_scatter.add_annotation(
-                x=5, y=38, text="Rule of 40", showarrow=False, font=dict(color="gray", size=12),
-            )
-            fig_scatter.update_layout(height=600, margin=dict(t=40, l=10, r=10, b=10))
-            st.plotly_chart(fig_scatter, use_container_width=True)
-
-        st.subheader("Screened Results")
-        screen_display = screened[["ticker", "shortName", "sub_sector", "currentPrice",
-                                    "marketCap", "trailingPE", "ytd_return", "revenueGrowth",
-                                    "profitMargins", "rule_of_40", "enterpriseToRevenue"]].copy()
-        screen_display.columns = ["Ticker", "Name", "Sub-Sector", "Price", "Market Cap",
-                                  "P/E", "YTD %", "Rev Growth", "Profit Margin", "Rule of 40", "EV/Revenue"]
-        screen_display = screen_display.sort_values("Market Cap", ascending=False).reset_index(drop=True)
-        screen_display.index = range(1, len(screen_display) + 1)
-        st.dataframe(
-            screen_display.style.format({
-                "Price": lambda x: f"${x:.2f}" if pd.notna(x) else "N/A",
-                "Market Cap": lambda x: format_large_number(x),
-                "P/E": lambda x: safe_val(x, ".1f"), "YTD %": lambda x: safe_pct(x),
-                "Rev Growth": lambda x: safe_pct(x * 100 if pd.notna(x) else None),
-                "Profit Margin": lambda x: safe_pct(x * 100 if pd.notna(x) else None),
-                "Rule of 40": lambda x: safe_val(x, ".1f"), "EV/Revenue": lambda x: safe_val(x, ".1f"),
-            }),
-            use_container_width=True, height=min(600, 35 * len(screen_display) + 38),
-        )
-
-        csv = screened.to_csv(index=False)
-        st.download_button(
-            label="Export filtered results as CSV", data=csv,
-            file_name=f"saas_screener_{datetime.now().strftime('%Y%m%d')}.csv", mime="text/csv",
-        )
+        render_screener(filtered_df)
 
 
 # ─────────────────────────────────────────────
 # TAB 6 — MOMENTUM & SIGNALS
 # ─────────────────────────────────────────────
-with tab6:
+if selected_tab == "Momentum & Signals":
     st.header("Momentum & Signals")
     if len(filtered_df) == 0:
         st.warning("No data available. Adjust your filters.")
